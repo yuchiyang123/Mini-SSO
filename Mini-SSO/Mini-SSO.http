@@ -1,0 +1,6 @@
+@Mini_SSO_HostAddress = http://localhost:5274
+
+GET {{Mini_SSO_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
