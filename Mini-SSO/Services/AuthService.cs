@@ -3,8 +3,10 @@ using System.Security.Claims;
 using System.Text;
 using AutoMapper;
 using Microsoft.AspNetCore.Identity;
+using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
+using Mini_SSO.Common.Exceptions;
 using Mini_SSO.Model.Dtos;
 using Mini_SSO.Model.Entities;
 
@@ -16,9 +18,9 @@ namespace Mini_SSO.Services
 
         public async Task<bool> LoginAsync(string userName, string password)
         {
-            var users = await context.Users.FirstOrDefaultAsync(x => x.UserName == userName);
-            if (users is null)
-                return false;
+            var users =
+                await context.Users.FirstOrDefaultAsync(x => x.UserName == userName)
+                ?? throw new DomainValidationException("使用者帳號或是密碼錯誤");
             var hasher = new PasswordHasher<Users>();
             var result = hasher.VerifyHashedPassword(users, users.PasswordHash!, password);
             return result != PasswordVerificationResult.Failed;
@@ -67,7 +69,20 @@ namespace Mini_SSO.Services
             var hasher = new PasswordHasher<Users>();
             entity.PasswordHash = hasher.HashPassword(entity, userDto.Password);
             context.Users.Add(entity);
-            await context.SaveChangesAsync();
+            try
+            {
+                await context.SaveChangesAsync();
+            }
+            catch (DbUpdateException ex)
+                when (ex.InnerException is SqlException { Number: 2601 or 2627 }) // 違反唯一性
+            {
+                throw new DomainValidationException(
+                    new Dictionary<string, string[]>
+                    {
+                        [nameof(userDto.UserName)] = ["Username already exists."],
+                    }
+                );
+            }
         }
     }
 }

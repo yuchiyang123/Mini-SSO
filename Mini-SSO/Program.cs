@@ -1,11 +1,14 @@
 using System.Text;
 using AutoMapper;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.Builder;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
+using Mini_SSO.Middleware;
 using Mini_SSO.Model.Entities;
 using Mini_SSO.Seed;
 using Mini_SSO.Services;
+using Scalar.AspNetCore;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -46,6 +49,9 @@ builder.Services.AddDbContext<AuthContext>(options =>
     options.UseSqlServer(builder.Configuration.GetConnectionString("DefaultConnection"))
 );
 
+builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
+builder.Services.AddProblemDetails();
+
 builder.Services.AddAntiforgery(options =>
 {
     options.HeaderName = "X-CSRF-TOKEN";
@@ -67,16 +73,12 @@ builder.Services.AddOpenApi();
 
 var app = builder.Build();
 
-if (app.Environment.IsDevelopment())
-{
-    app.MapOpenApi();
-}
-
+app.MapOpenApi();
+app.MapScalarApiReference();
 app.UseHttpsRedirection();
 app.UseAuthentication();
+app.UseExceptionHandler();
 app.UseAuthorization();
-app.UseSwagger();
-app.UseSwaggerUI();
 app.MapControllers();
 
 using (var scope = app.Services.CreateScope())
@@ -85,4 +87,40 @@ using (var scope = app.Services.CreateScope())
     await SeedUser.SeedUserAsync(context);
 }
 
+app.Use(
+    async (context, next) =>
+    {
+        var headers = context.Response.Headers;
+
+        headers.Append("Cross-Origin-Embedder-Policy", "require-corp");
+        headers.Append("Cross-Origin-Opener-Policy", "same-origin");
+        headers.Append("Cross-Origin-Resource-Policy", "same-origin");
+
+        headers.Append("X-Content-Type-Options", "nosniff");
+        headers.Append("Referrer-Policy", "strict-origin-when-cross-origin");
+        headers.Append(
+            "Permissions-Policy",
+            "camera=(), microphone=(), geolocation=(), payment=()"
+        );
+
+        headers.Append(
+            "Content-Security-Policy",
+            "default-src 'self'; "
+                + "script-src 'self'; "
+                + "style-src 'self'; "
+                + "img-src 'self' data:; "
+                + "font-src 'self'; "
+                + "connect-src 'self'; "
+                + "object-src 'none'; "
+                + "base-uri 'self'; "
+                + "frame-ancestors 'none'"
+        );
+
+        // ������ݸ�T
+        headers.Remove("Server");
+        headers.Remove("X-Powered-By");
+
+        await next();
+    }
+);
 app.Run();
