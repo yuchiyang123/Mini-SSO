@@ -1,9 +1,11 @@
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
+using Microsoft.AspNetCore.Antiforgery;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Mini_SSO.Common.Enums;
+using Mini_SSO.Common.Filters;
 using Mini_SSO.Model.Dtos;
 using Mini_SSO.Services;
 
@@ -27,14 +29,26 @@ namespace Mini_SSO.Controllers
             ["github"] = ProviderEnums.GitHub,
         };
 
+        /// <summary>
+        /// 取得 CSRF token（雙提交 cookie 模式）。前端進站時先呼叫這支，
+        /// 把回傳的 csrfToken 放進後續 POST 請求的 X-CSRF-TOKEN header。
+        /// </summary>
+        [HttpGet("csrf")]
+        public IActionResult GetCsrfToken([FromServices] IAntiforgery antiforgery)
+        {
+            var tokens = antiforgery.GetAndStoreTokens(HttpContext);
+            return Ok(new { csrfToken = tokens.RequestToken });
+        }
+
         [HttpPost()]
+        [ApiAntiforgery]
         public async Task<IActionResult> Login([FromBody] LoginDto dto)
         {
-            if (await service.LoginAsync(dto.UserName, dto.Password))
+            if (await service.LoginAsync(dto.UserName, dto.Password, GetClientIp()))
             {
                 Guid userId = await service.GetIdByUserName(dto.UserName);
                 string token = service.GenerateeToken(userId.ToString());
-                Response.Cookies.Append("token", token, new CookieOptions { HttpOnly = true });
+                AppendAuthCookie(token);
 
                 return Ok();
             }
@@ -43,6 +57,7 @@ namespace Mini_SSO.Controllers
 
         [HttpPost("logout")]
         [Authorize]
+        [ApiAntiforgery]
         public IActionResult Logout()
         {
             Response.Cookies.Delete("token");
@@ -50,6 +65,7 @@ namespace Mini_SSO.Controllers
         }
 
         [HttpPost("create")]
+        [ApiAntiforgery]
         public async Task<ActionResult> Create(CreateUserDto userDto)
         {
             await service.CreateUserAsync(userDto);
@@ -148,10 +164,27 @@ namespace Mini_SSO.Controllers
 
             var userId = await service.ExternalLoginAsync(providerEnum, providerKey, email, name);
             var token = service.GenerateeToken(userId.ToString());
-            Response.Cookies.Append("token", token, new CookieOptions { HttpOnly = true });
+            AppendAuthCookie(token);
 
             var frontendUrl = configuration["Frontend:RedirectUrl"];
             return string.IsNullOrWhiteSpace(frontendUrl) ? Ok() : Redirect(frontendUrl);
         }
+
+        private void AppendAuthCookie(string token)
+        {
+            Response.Cookies.Append(
+                "token",
+                token,
+                new CookieOptions
+                {
+                    HttpOnly = true,
+                    Secure = Request.IsHttps,
+                    SameSite = SameSiteMode.Lax,
+                }
+            );
+        }
+
+        private string GetClientIp() =>
+            HttpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown";
     }
 }

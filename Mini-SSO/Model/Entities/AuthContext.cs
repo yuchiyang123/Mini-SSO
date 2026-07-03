@@ -6,6 +6,7 @@ namespace Mini_SSO.Model.Entities
     {
         public DbSet<Users> Users { get; set; }
         public DbSet<UserLogin> UserLogins { get; set; }
+        public DbSet<LoginAttempt> LoginAttempts { get; set; }
 
         protected override void OnModelCreating(ModelBuilder builder)
         {
@@ -38,6 +39,12 @@ namespace Mini_SSO.Model.Entities
                     .OnDelete(DeleteBehavior.Cascade);
 
                 entity.HasIndex(e => new { e.Provider, e.ProviderKey }).IsUnique();
+            });
+
+            builder.Entity<LoginAttempt>(entity =>
+            {
+                entity.HasKey(e => e.IpAddress);
+                entity.Property(e => e.IpAddress).HasMaxLength(64);
             });
         }
     }

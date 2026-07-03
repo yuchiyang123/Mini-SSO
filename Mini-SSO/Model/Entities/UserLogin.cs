@@ -14,6 +14,6 @@ namespace Mini_SSO.Model.Entities
         /// </summary>
         public required string ProviderKey { get; set; }
         public Guid UserId { get; set; }
-        public Users User { get; set; }
+        public required Users User { get; set; }
     }
 }

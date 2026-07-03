@@ -16,14 +16,77 @@ namespace Mini_SSO.Services
     {
         public readonly IConfiguration _configuration = configuration;
 
-        public async Task<bool> LoginAsync(string userName, string password)
+        private const int MaxFailedAttempts = 5;
+        private static readonly TimeSpan LockoutDuration = TimeSpan.FromMinutes(10);
+
+        public async Task<bool> LoginAsync(string userName, string password, string ipAddress)
         {
-            var users =
-                await context.Users.FirstOrDefaultAsync(x => x.UserName == userName)
-                ?? throw new DomainValidationException("使用者帳號或是密碼錯誤");
+            await EnsureNotLockedOutAsync(ipAddress);
+
+            var user = await context.Users.FirstOrDefaultAsync(x => x.UserName == userName);
             var hasher = new PasswordHasher<Users>();
-            var result = hasher.VerifyHashedPassword(users, users.PasswordHash!, password);
-            return result != PasswordVerificationResult.Failed;
+            var success =
+                user?.PasswordHash is not null
+                && hasher.VerifyHashedPassword(user, user.PasswordHash, password)
+                    != PasswordVerificationResult.Failed;
+
+            await RecordLoginAttemptAsync(ipAddress, success);
+
+            if (!success)
+            {
+                throw new DomainValidationException("使用者帳號或是密碼錯誤");
+            }
+
+            return true;
+        }
+
+        private async Task EnsureNotLockedOutAsync(string ipAddress)
+        {
+            var attempt = await context.LoginAttempts.FirstOrDefaultAsync(a =>
+                a.IpAddress == ipAddress
+            );
+
+            if (attempt?.LockedUntil is { } lockedUntil && lockedUntil > DateTime.UtcNow)
+            {
+                var retryAfterSeconds = (int)
+                    Math.Ceiling((lockedUntil - DateTime.UtcNow).TotalSeconds);
+                throw new TooManyRequestsException(
+                    $"登入失敗次數過多，請於 {retryAfterSeconds} 秒後再試。",
+                    retryAfterSeconds
+                );
+            }
+        }
+
+        private async Task RecordLoginAttemptAsync(string ipAddress, bool success)
+        {
+            var attempt = await context.LoginAttempts.FirstOrDefaultAsync(a =>
+                a.IpAddress == ipAddress
+            );
+
+            if (attempt is null)
+            {
+                attempt = new LoginAttempt { IpAddress = ipAddress };
+                context.LoginAttempts.Add(attempt);
+            }
+
+            attempt.LastAttemptAt = DateTime.UtcNow;
+
+            if (success)
+            {
+                attempt.FailedCount = 0;
+                attempt.LockedUntil = null;
+            }
+            else
+            {
+                attempt.FailedCount++;
+                if (attempt.FailedCount >= MaxFailedAttempts)
+                {
+                    attempt.LockedUntil = DateTime.UtcNow.Add(LockoutDuration);
+                    attempt.FailedCount = 0;
+                }
+            }
+
+            await context.SaveChangesAsync();
         }
 
         public async Task<Guid> GetIdByUserName(string userName)

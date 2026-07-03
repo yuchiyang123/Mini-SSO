@@ -163,6 +163,8 @@ builder.Services.AddDbContext<AuthContext>(options =>
     options.UseSqlServer(builder.Configuration.GetConnectionString("DefaultConnection"))
 );
 
+builder.Services.AddHealthChecks().AddDbContextCheck<AuthContext>();
+
 builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
 builder.Services.AddProblemDetails();
 
@@ -171,7 +173,7 @@ builder.Services.AddAntiforgery(options =>
     options.HeaderName = "X-CSRF-TOKEN";
     options.Cookie.Name = "XSRF-TOKEN";
     options.Cookie.HttpOnly = false;
-    options.Cookie.SecurePolicy = CookieSecurePolicy.Always;
+    options.Cookie.SecurePolicy = CookieSecurePolicy.SameAsRequest;
 });
 
 builder.Services.AddScoped<AuthService>();
@@ -211,12 +213,13 @@ app.UseAuthentication();
 app.UseExceptionHandler();
 app.UseAuthorization();
 app.MapControllers();
+app.MapHealthChecks("/healthz");
 
 using (var scope = app.Services.CreateScope())
 {
     var context = scope.ServiceProvider.GetRequiredService<AuthContext>();
     await context.Database.MigrateAsync();
-    await SeedUser.SeedUserAsync(context);
+    await SeedUser.SeedUserAsync(context, app.Configuration);
 }
 
 app.Use(

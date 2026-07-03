@@ -9,7 +9,12 @@
 - GitHub OAuth 登入
 - 同一個 Email 的帳密帳號與第三方登入帳號會自動綁定，不會產生重複使用者
 - 尚未設定金鑰的第三方登入會回傳 `503`，不會讓整個服務掛掉
-- Docker Compose 一鍵部署（API + SQL Server）
+- 登入端點防暴力破解：同一 IP 連續失敗 5 次鎖定 10 分鐘
+- CSRF 防護（雙提交 Cookie 模式），涵蓋所有會改變狀態的 POST 端點
+- `GET /api/auth/me` 取得目前登入者資訊
+- `GET /healthz` 健康檢查（含資料庫連線檢查），供 Docker/K8s 等 orchestrator 使用
+- 預設管理員帳號（seed）可透過設定關閉或改成自訂帳密，不是寫死的後門
+- Docker Compose 一鍵部署（API + SQL Server），含 API healthcheck
 
 ## 技術棧
 
@@ -24,18 +29,19 @@
 
 ```
 Mini-SSO/
-├── Controllers/AuthController.cs      # 登入/註冊/登出/第三方登入 端點
-├── Services/AuthService.cs            # 業務邏輯（含 ExternalLoginAsync 找/建使用者）
+├── Controllers/AuthController.cs      # 登入/註冊/登出/第三方登入/CSRF/me 端點
+├── Services/AuthService.cs            # 業務邏輯（含 ExternalLoginAsync、登入鎖定邏輯）
 ├── Model/
-│   ├── Entities/                      # EF Core Entity（Users, UserLogin, AuthContext）
-│   └── Dtos/                          # LoginDto, CreateUserDto
+│   ├── Entities/                      # EF Core Entity（Users, UserLogin, LoginAttempt, AuthContext）
+│   └── Dtos/                          # LoginDto, CreateUserDto, CurrentUserDto
 ├── Common/
 │   ├── Enums/ProviderEnums.cs         # 支援的登入 provider 列舉
-│   └── Exceptions/                    # 自訂例外，統一由 GlobalExceptionHandler 處理
+│   ├── Exceptions/                    # 自訂例外，統一由 GlobalExceptionHandler 處理
+│   └── Filters/ApiAntiforgeryAttribute.cs  # 純 API 專案用的 CSRF 驗證 filter
 ├── Middleware/GlobalExceptionHandler.cs
-├── Seed/SeedUser.cs                   # 啟動時若無使用者，建立預設帳號
+├── Seed/SeedUser.cs                   # 啟動時若無使用者，可選擇建立預設帳號（可設定關閉/改帳密）
 ├── Migrations/                        # EF Core migrations
-├── Program.cs                         # 組合根：JWT / OAuth / CORS / DB / 安全標頭
+├── Program.cs                         # 組合根：JWT / OAuth / CORS / CSRF / 健康檢查 / DB / 安全標頭
 └── Dockerfile
 docs/
 └── FRONTEND_INTEGRATION.md            # 前端串接指南
@@ -47,12 +53,19 @@ docker-compose.yml                     # API + SQL Server 一鍵部署
 
 - **Users**：`UserId, UserName, Email, PasswordHash(可為 null), CreateAt, UpdateAt`。`PasswordHash` 為 `null` 代表這是純第三方登入建立的帳號，沒有密碼。
 - **UserLogin**：`(Provider, ProviderKey)` 複合主鍵，對應到 `UserId`。一個使用者可以綁定多個第三方帳號；同一個第三方帳號只能綁定一個使用者（唯一索引）。
+- **LoginAttempt**：以 `IpAddress` 為主鍵，記錄 `FailedCount`（連續失敗次數）、`LockedUntil`（鎖定到什麼時候）、`LastAttemptAt`。登入成功會重置；失敗達 5 次會設定 10 分鐘鎖定並歸零計數。
 
 ## 認證流程
 
 ### 帳號密碼
 
-`POST /api/auth` 驗證成功後，用 `AuthService.GenerateeToken` 簽發 JWT，寫入 `HttpOnly` 的 `token` Cookie。之後的請求由 `JwtBearer` 驗證這個 Cookie（見 `Program.cs` 的 `OnMessageReceived`，會從 `Request.Cookies["token"]` 讀 token，而不是走標準的 `Authorization` header）。
+`POST /api/auth` 驗證成功後，用 `AuthService.GenerateeToken` 簽發 JWT，寫入 `HttpOnly` 的 `token` Cookie（`SameSite=Lax`，`Secure` 依請求是否為 HTTPS 動態決定）。之後的請求由 `JwtBearer` 驗證這個 Cookie（見 `Program.cs` 的 `OnMessageReceived`，會從 `Request.Cookies["token"]` 讀 token，而不是走標準的 `Authorization` header）。
+
+登入前會先檢查 `AuthService.EnsureNotLockedOutAsync`：依來源 IP 查 `LoginAttempts`，若在鎖定期內直接丟 `TooManyRequestsException`（→ `429`，帶 `Retry-After` header）。驗證完成後 `RecordLoginAttemptAsync` 會更新該 IP 的失敗計數；連續失敗達 5 次即鎖定 10 分鐘並歸零計數。為避免帳號枚舉，帳號不存在跟密碼錯誤回傳同一種訊息，且不會透露帳號是否存在。
+
+### CSRF
+
+`Program.cs` 用 `AddAntiforgery` 註冊雙提交 Cookie 模式（header 名稱 `X-CSRF-TOKEN`，Cookie 名稱 `XSRF-TOKEN`，非 HttpOnly 讓前端 JS 可讀）。因為這是純 `AddControllers()` 的 API 專案（沒有 `AddControllersWithViews`），內建的 `[ValidateAntiForgeryToken]` 屬性依賴的過濾器服務不會被註冊，所以另外寫了 `Common/Filters/ApiAntiforgeryAttribute.cs`，直接呼叫 `IAntiforgery.ValidateRequestAsync` 達到一樣的效果，套用在 `Login`、`Create`、`Logout` 三個端點。`GET /api/auth/csrf` 負責簽發 token。
 
 ### 第三方登入（Google / GitHub）
 
@@ -71,15 +84,17 @@ docker-compose.yml                     # API + SQL Server 一鍵部署
 
 ## API 端點
 
-| Method | Path | 說明 | 需要登入 |
-|---|---|---|---|
-| POST | `/api/auth` | 帳密登入 | 否 |
-| POST | `/api/auth/create` | 註冊新帳號 | 否 |
-| GET | `/api/auth/valid/username?username=` | 查詢帳號是否可用 | 否 |
-| POST | `/api/auth/logout` | 登出 | 是 |
-| GET | `/api/auth/me` | 取得目前登入者資料（UserId/UserName/Email/是否有密碼/已綁定的 provider） | 是 |
-| GET | `/api/auth/external/{provider}/login` | 觸發第三方登入（`google` / `github`） | 否 |
-| GET | `/api/auth/external/{provider}/callback` | 第三方登入回呼（供 provider 導回，不用手動呼叫） | 否 |
+| Method | Path | 說明 | 需要登入 | 需要 CSRF token |
+|---|---|---|---|---|
+| GET | `/api/auth/csrf` | 取得 CSRF token | 否 | - |
+| POST | `/api/auth` | 帳密登入（同 IP 失敗 5 次鎖 10 分鐘） | 否 | 是 |
+| POST | `/api/auth/create` | 註冊新帳號 | 否 | 是 |
+| GET | `/api/auth/valid/username?username=` | 查詢帳號是否可用 | 否 | - |
+| POST | `/api/auth/logout` | 登出 | 是 | 是 |
+| GET | `/api/auth/me` | 取得目前登入者資料（UserId/UserName/Email/是否有密碼/已綁定的 provider） | 是 | - |
+| GET | `/api/auth/external/{provider}/login` | 觸發第三方登入（`google` / `github`） | 否 | - |
+| GET | `/api/auth/external/{provider}/callback` | 第三方登入回呼（供 provider 導回，不用手動呼叫） | 否 | - |
+| GET | `/healthz` | 健康檢查（含 DB 連線檢查） | 否 | - |
 
 啟動後可到 `/scalar/v1` 看互動式 API 文件。
 
@@ -97,6 +112,8 @@ docker-compose.yml                     # API + SQL Server 一鍵部署
 | `Authentication__GitHub__ClientId` / `...ClientSecret` | `Authentication:GitHub:*` | GitHub OAuth 憑證 |
 | `Frontend__RedirectUrl` | `Frontend:RedirectUrl` | SSO 登入完成後導回的前端網址 |
 | `Cors__AllowedOrigins` | `Cors:AllowedOrigins` | 允許呼叫本 API 的前端網域，逗號分隔 |
+| `Seed__CreateDefaultAdmin` | `Seed:CreateDefaultAdmin` | 是否在資料庫是空的時候建立預設管理員帳號，預設 `true`；正式環境建議設 `false` |
+| `Seed__AdminUserName` / `...AdminPassword` / `...AdminEmail` | `Seed:*` | 預設管理員帳號的帳密/信箱，未設定則用 `admin` / `admin123` / `123@test.com` |
 
 ## 申請第三方登入金鑰
 
@@ -168,11 +185,19 @@ docker compose down -v     # 停止並刪除資料庫資料
 - [x] 同一個第三方帳號重複登入 → 綁回原本的使用者，不產生重複帳號
 - [x] 未設定金鑰的 provider 呼叫 `/login` 回 `503`，服務其餘功能不受影響
 - [x] CORS：白名單網域的 preflight 請求正確回傳 `Access-Control-Allow-Origin`，非白名單網域被擋下
-- [x] `dotnet build` / Docker image 建置皆無錯誤
+- [x] CSRF：沒帶 `X-CSRF-TOKEN` 呼叫 `/api/auth`、`/create`、`/logout` 回 `400`；帶正確 token 可正常呼叫
+- [x] 登入鎖定：連續 5 次密碼錯誤後，第 6 次（即使密碼正確）回 `429`，`Retry-After` 為剩餘鎖定秒數；`LoginAttempts` 資料表狀態正確
+- [x] `GET /api/auth/me`：未登入回 `401`，登入後正確回傳使用者資料
+- [x] `GET /healthz`：回 `200 Healthy`；Docker Compose 的 healthcheck 正確反映在 `docker compose ps`（`healthy`）
+- [x] `dotnet build` / Docker image（`--no-cache`）建置皆無錯誤與警告
 
 ## 安全性備註
 
-- JWT 一律走 `HttpOnly` Cookie，前端 JS 無法讀取，降低 XSS 竊取風險。
+- JWT 一律走 `HttpOnly` Cookie，前端 JS 無法讀取，降低 XSS 竊取風險；`SameSite=Lax` + `Secure`（依 HTTPS 動態決定）降低 CSRF/中間人風險。
+- 另外針對 `Login`/`Create`/`Logout` 三個會改變狀態的端點，額外做了雙提交 Cookie 的 CSRF token 驗證（不只依賴 SameSite）。
 - 密碼使用 ASP.NET Core Identity 的 `PasswordHasher`（PBKDF2）。
+- 登入端點有 IP 層級的暴力破解防護（5 次失敗鎖 10 分鐘），失敗訊息不透露帳號是否存在，避免帳號枚舉。
 - `appsettings.json` 中的密鑰皆為佔位假值，正式環境務必透過環境變數 / secret store 覆蓋，不要把真實密鑰提交進 git（`.env` 已在 `.gitignore`）。
 - CORS 預設不開放任何網域（`AllowedOrigins` 為空時該 Policy 不允許任何來源），需明確設定才會放行。
+- 預設管理員帳號（seed）在正式環境是個已知風險（帳密公開在原始碼裡），建議部署到真正的正式環境時把 `Seed:CreateDefaultAdmin` 設為 `false`，或至少透過 `Seed:AdminPassword` 換成強密碼。
+- **已知技術債**：`Microsoft.Extensions.Identity.Core` 曾經被誤鎖在 `10.0.9`（.NET 10 版本，跟專案的 `net9.0` 不符），導致發佈到容器後 `Microsoft.AspNetCore.Cryptography.Internal.dll` 版本錯位，任何用到 DataProtection/Antiforgery 的請求都會 500（`MissingMethodException`）。已改回 `9.0.17`；之後升級任何 `Microsoft.*` 套件時要注意版本要跟 `TargetFramework` 一致，不要只挑「最新版」。

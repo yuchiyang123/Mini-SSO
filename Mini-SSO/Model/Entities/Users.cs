@@ -8,6 +8,6 @@
         public required string Email { get; set; }
         public DateTime UpdateAt { get; set; }
         public DateTime CreateAt { get; set; }
-        public List<UserLogin> UserLogins { get; set; }
+        public List<UserLogin> UserLogins { get; set; } = [];
     }
 }

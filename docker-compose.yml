@@ -43,6 +43,12 @@ services:
       Cors__AllowedOrigins: ${CORS_ALLOWED_ORIGINS}
     ports:
       - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
     restart: unless-stopped
 
 volumes:

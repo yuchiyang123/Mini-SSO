@@ -2,6 +2,10 @@
 
 # 此階段用於以快速模式從 VS 執行時 (偵錯設定的預設值)
 FROM mcr.microsoft.com/dotnet/aspnet:9.0 AS base
+# curl 用於 docker-compose healthcheck 呼叫 /healthz
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/*
 USER $APP_UID
 WORKDIR /app
 EXPOSE 8080

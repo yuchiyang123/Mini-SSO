@@ -23,4 +23,10 @@
             Errors = errors;
         }
     }
+
+    public sealed class TooManyRequestsException(string message, int retryAfterSeconds)
+        : Exception(message)
+    {
+        public int RetryAfterSeconds { get; } = retryAfterSeconds;
+    }
 }
