@@ -1,3 +1,4 @@
+using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authorization;
@@ -60,6 +61,26 @@ namespace Mini_SSO.Controllers
         {
             bool isRepeat = await service.ValidUserName(username);
             return isRepeat;
+        }
+
+        /// <summary>
+        /// 取得目前登入者的基本資料（含已綁定的第三方登入 provider）。
+        /// </summary>
+        [HttpGet("me")]
+        [Authorize]
+        public async Task<ActionResult<CurrentUserDto>> Me()
+        {
+            var userIdClaim =
+                User.FindFirstValue(ClaimTypes.NameIdentifier)
+                ?? User.FindFirstValue(JwtRegisteredClaimNames.Sub);
+
+            if (!Guid.TryParse(userIdClaim, out var userId))
+            {
+                return Unauthorized();
+            }
+
+            var currentUser = await service.GetCurrentUserAsync(userId);
+            return Ok(currentUser);
         }
 
         /// <summary>

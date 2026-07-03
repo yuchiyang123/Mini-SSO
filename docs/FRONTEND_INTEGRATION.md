@@ -87,11 +87,33 @@ window.location.href = `${API_BASE}/api/auth/external/google/login`;
 
 若某個 provider 尚未設定金鑰，點擊該連結會得到 `503 Service Unavailable`（純文字訊息），前端可以用這個狀態碼判斷「此登入方式尚未開放」並隱藏/停用對應按鈕（可另外呼叫後端提供的健康檢查或在前端硬編碼已知可用清單）。
 
-## 判斷目前是否已登入
+## 判斷目前是否已登入 / 取得使用者資訊
 
-目前 API 沒有提供「取得目前使用者資訊」的端點。前端若要判斷登入狀態，建議：
-1. 呼叫任一個 `[Authorize]` 端點（例如先呼叫一次 `POST /api/auth/logout` 之外的保護端點），依 `401` 判斷未登入。
-2. 或請後端後續補一個 `GET /api/auth/me` 回傳目前使用者資訊（目前尚未實作，如需要請再提出）。
+```
+GET /api/auth/me
+```
+- 已登入：`200 OK`，回傳：
+  ```json
+  {
+    "userId": "ebf680c2-aa39-4503-9112-5da86a14d5d2",
+    "userName": "admin",
+    "email": "123@test.com",
+    "hasPassword": true,
+    "linkedProviders": ["Google", "GitHub"]
+  }
+  ```
+- 未登入（沒有有效的 `token` Cookie）：`401 Unauthorized`。
+
+前端進站時可以先呼叫這支 API：`200` 就代表已登入並直接拿到使用者資料可以渲染；`401` 就導去登入頁。`hasPassword` 可以用來判斷這個帳號是否為「純 SSO 帳號」（沒設密碼），`linkedProviders` 是這個帳號已經綁定的第三方登入清單，可以用來在「帳號設定」頁顯示已連結的登入方式。
+
+```js
+const res = await fetch(`${API_BASE}/api/auth/me`, { credentials: 'include' });
+if (res.ok) {
+  const me = await res.json();
+} else {
+  // 401，導去登入頁
+}
+```
 
 ## 常見錯誤排查
 

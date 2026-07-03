@@ -3,7 +3,6 @@ using System.Security.Claims;
 using System.Text;
 using System.Text.Json;
 using AspNet.Security.OAuth.GitHub;
-using AutoMapper;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Authentication.Google;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
@@ -199,10 +198,6 @@ builder.Services.AddCors(options =>
 
 builder.Services.AddControllers();
 builder.Services.AddAuthorization();
-builder.Services.AddAutoMapper(
-    (IMapperConfigurationExpression cfg) => { },
-    AppDomain.CurrentDomain.GetAssemblies()
-);
 
 builder.Services.AddOpenApi();
 

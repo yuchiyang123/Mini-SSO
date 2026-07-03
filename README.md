@@ -16,8 +16,9 @@
 - ASP.NET Core 9（Web API）
 - Entity Framework Core 9 + SQL Server
 - JWT Bearer（驗證）＋ Cookie（傳遞方式）
-- AutoMapper
 - Scalar（OpenAPI 文件 UI）
+
+> 原本有用 AutoMapper 做 DTO→Entity 映射，但 AutoMapper 自 v13 起改為商業授權（Lucky Penny Software），正式營運需要付費授權。由於專案裡只有一個單欄位映射，已改為手動映射並移除這個依賴，避免授權風險。
 
 ## 專案結構
 
@@ -76,6 +77,7 @@ docker-compose.yml                     # API + SQL Server 一鍵部署
 | POST | `/api/auth/create` | 註冊新帳號 | 否 |
 | GET | `/api/auth/valid/username?username=` | 查詢帳號是否可用 | 否 |
 | POST | `/api/auth/logout` | 登出 | 是 |
+| GET | `/api/auth/me` | 取得目前登入者資料（UserId/UserName/Email/是否有密碼/已綁定的 provider） | 是 |
 | GET | `/api/auth/external/{provider}/login` | 觸發第三方登入（`google` / `github`） | 否 |
 | GET | `/api/auth/external/{provider}/callback` | 第三方登入回呼（供 provider 導回，不用手動呼叫） | 否 |
 

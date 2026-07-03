@@ -1,7 +1,6 @@
 ﻿using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
 using System.Text;
-using AutoMapper;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
@@ -13,7 +12,7 @@ using Mini_SSO.Model.Entities;
 
 namespace Mini_SSO.Services
 {
-    public class AuthService(AuthContext context, IMapper mapper, IConfiguration configuration)
+    public class AuthService(AuthContext context, IConfiguration configuration)
     {
         public readonly IConfiguration _configuration = configuration;
 
@@ -41,6 +40,24 @@ namespace Mini_SSO.Services
             return !isRepeat;
         }
 
+        public async Task<CurrentUserDto> GetCurrentUserAsync(Guid userId)
+        {
+            var user =
+                await context
+                    .Users.Include(u => u.UserLogins)
+                    .FirstOrDefaultAsync(u => u.UserId == userId)
+                ?? throw new DomainNotFoundException(nameof(Users), userId);
+
+            return new CurrentUserDto
+            {
+                UserId = user.UserId,
+                UserName = user.UserName,
+                Email = user.Email,
+                HasPassword = user.PasswordHash is not null,
+                LinkedProviders = user.UserLogins.Select(l => l.Provider.ToString()).ToList(),
+            };
+        }
+
         public string GenerateeToken(string userId)
         {
             var jwtConfig = _configuration.GetSection("Jwt");
@@ -66,7 +83,7 @@ namespace Mini_SSO.Services
 
         public async Task CreateUserAsync(CreateUserDto userDto)
         {
-            var entity = mapper.Map<Users>(userDto);
+            var entity = new Users { UserName = userDto.UserName, Email = userDto.Email };
             var hasher = new PasswordHasher<Users>();
             entity.PasswordHash = hasher.HashPassword(entity, userDto.Password);
             context.Users.Add(entity);
