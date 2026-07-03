@@ -45,7 +45,7 @@ await fetch(`${API_BASE}/api/auth`, {
 
 ## API 一覽
 
-Base URL 以你部署的網址為準（本機開發預設 `http://localhost:5274`，Docker 部署預設 `http://localhost:8080`）。
+Base URL 以你部署的網址為準（本機開發預設 `http://localhost:5274`，Docker 部署預設 `http://localhost:12080`）。
 
 ### 帳密登入
 
@@ -115,8 +115,8 @@ await fetch(`${API_BASE}/api/auth/logout`, {
 第三方登入**不是**用 fetch/AJAX 呼叫，而是**整頁導向**（跟一般網站的「用 Google 登入」按鈕一樣）：
 
 ```html
-<a href="http://localhost:8080/api/auth/external/google/login">使用 Google 登入</a>
-<a href="http://localhost:8080/api/auth/external/github/login">使用 GitHub 登入</a>
+<a href="http://localhost:12080/api/auth/external/google/login">使用 Google 登入</a>
+<a href="http://localhost:12080/api/auth/external/github/login">使用 GitHub 登入</a>
 ```
 
 或用 JS 導頁：
