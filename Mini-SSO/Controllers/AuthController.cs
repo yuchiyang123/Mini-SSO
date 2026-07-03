@@ -16,7 +16,8 @@ namespace Mini_SSO.Controllers
     public class AuthController(
         AuthService service,
         IConfiguration configuration,
-        ExternalProviderAvailability providerAvailability
+        ExternalProviderAvailability providerAvailability,
+        IAntiforgery antiforgery
     ) : ControllerBase
     {
         private const string ExternalCookieScheme = "ExternalCookie";
@@ -34,7 +35,7 @@ namespace Mini_SSO.Controllers
         /// 把回傳的 csrfToken 放進後續 POST 請求的 X-CSRF-TOKEN header。
         /// </summary>
         [HttpGet("csrf")]
-        public IActionResult GetCsrfToken([FromServices] IAntiforgery antiforgery)
+        public IActionResult GetCsrfToken()
         {
             var tokens = antiforgery.GetAndStoreTokens(HttpContext);
             return Ok(new { csrfToken = tokens.RequestToken });
