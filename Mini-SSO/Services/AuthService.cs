@@ -6,6 +6,7 @@ using Microsoft.AspNetCore.Identity;
 using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
+using Mini_SSO.Common.Enums;
 using Mini_SSO.Common.Exceptions;
 using Mini_SSO.Model.Dtos;
 using Mini_SSO.Model.Entities;
@@ -83,6 +84,85 @@ namespace Mini_SSO.Services
                     }
                 );
             }
+        }
+
+        /// <summary>
+        /// 依外部登入資訊找出（或建立）對應的本地使用者，並回傳其 UserId。
+        /// 已綁定過 -> 直接回傳；Email 已存在 -> 綁定到既有帳號；否則建立新帳號（無密碼）。
+        /// </summary>
+        public async Task<Guid> ExternalLoginAsync(
+            ProviderEnums provider,
+            string providerKey,
+            string email,
+            string? displayName
+        )
+        {
+            var existingLogin = await context.UserLogins.FirstOrDefaultAsync(l =>
+                l.Provider == provider && l.ProviderKey == providerKey
+            );
+
+            if (existingLogin is not null)
+            {
+                return existingLogin.UserId;
+            }
+
+            var user = await context.Users.FirstOrDefaultAsync(u => u.Email == email);
+
+            if (user is null)
+            {
+                user = new Users
+                {
+                    UserName = await GenerateUniqueUserNameAsync(email, displayName),
+                    Email = email,
+                    PasswordHash = null,
+                };
+                context.Users.Add(user);
+            }
+
+            context.UserLogins.Add(
+                new UserLogin
+                {
+                    Provider = provider,
+                    ProviderKey = providerKey,
+                    User = user,
+                }
+            );
+
+            try
+            {
+                await context.SaveChangesAsync();
+            }
+            catch (DbUpdateException ex)
+                when (ex.InnerException is SqlException { Number: 2601 or 2627 })
+            {
+                throw new DomainValidationException(
+                    "This external account could not be linked due to a conflicting record; please try again."
+                );
+            }
+
+            return user.UserId;
+        }
+
+        private async Task<string> GenerateUniqueUserNameAsync(string email, string? displayName)
+        {
+            var baseSource = !string.IsNullOrWhiteSpace(displayName)
+                ? displayName
+                : email.Split('@')[0];
+            var baseName = new string(baseSource.Where(char.IsLetterOrDigit).ToArray());
+            if (string.IsNullOrEmpty(baseName))
+            {
+                baseName = "user";
+            }
+
+            var candidate = baseName;
+            var suffix = 0;
+            while (await context.Users.AnyAsync(u => u.UserName == candidate))
+            {
+                suffix++;
+                candidate = $"{baseName}{suffix}";
+            }
+
+            return candidate;
         }
     }
 }

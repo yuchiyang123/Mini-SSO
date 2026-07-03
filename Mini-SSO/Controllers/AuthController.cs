@@ -1,5 +1,8 @@
-﻿using Microsoft.AspNetCore.Authorization;
+using System.Security.Claims;
+using Microsoft.AspNetCore.Authentication;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Mini_SSO.Common.Enums;
 using Mini_SSO.Model.Dtos;
 using Mini_SSO.Services;
 
@@ -7,8 +10,22 @@ namespace Mini_SSO.Controllers
 {
     [Route("api/[controller]")]
     [ApiController]
-    public class AuthController(AuthService service) : ControllerBase
+    public class AuthController(
+        AuthService service,
+        IConfiguration configuration,
+        ExternalProviderAvailability providerAvailability
+    ) : ControllerBase
     {
+        private const string ExternalCookieScheme = "ExternalCookie";
+
+        private static readonly Dictionary<string, ProviderEnums> ExternalProviders = new(
+            StringComparer.OrdinalIgnoreCase
+        )
+        {
+            ["google"] = ProviderEnums.Google,
+            ["github"] = ProviderEnums.GitHub,
+        };
+
         [HttpPost()]
         public async Task<IActionResult> Login([FromBody] LoginDto dto)
         {
@@ -43,6 +60,77 @@ namespace Mini_SSO.Controllers
         {
             bool isRepeat = await service.ValidUserName(username);
             return isRepeat;
+        }
+
+        /// <summary>
+        /// 觸發第三方登入，導向 provider 的授權頁面。provider: google / github。
+        /// </summary>
+        [HttpGet("external/{provider}/login")]
+        public IActionResult ExternalLogin(string provider)
+        {
+            if (!ExternalProviders.TryGetValue(provider, out var providerEnum))
+            {
+                return BadRequest($"Unsupported provider '{provider}'.");
+            }
+
+            if (!providerAvailability.IsEnabled(providerEnum.ToString()))
+            {
+                return StatusCode(
+                    StatusCodes.Status503ServiceUnavailable,
+                    $"'{provider}' login is not configured yet. Please contact the administrator."
+                );
+            }
+
+            var callbackUrl = Url.Action(
+                nameof(ExternalLoginCallback),
+                "Auth",
+                new { provider },
+                Request.Scheme
+            );
+
+            var properties = new AuthenticationProperties { RedirectUri = callbackUrl };
+            return Challenge(properties, providerEnum.ToString());
+        }
+
+        /// <summary>
+        /// 第三方登入完成後的回呼：讀取暫存 cookie 中的 claims，找到（或建立）本地帳號，
+        /// 簽發本地 JWT cookie，再導回前端頁面。
+        /// </summary>
+        [HttpGet("external/{provider}/callback")]
+        public async Task<IActionResult> ExternalLoginCallback(string provider)
+        {
+            if (!ExternalProviders.TryGetValue(provider, out var providerEnum))
+            {
+                return BadRequest($"Unsupported provider '{provider}'.");
+            }
+
+            var result = await HttpContext.AuthenticateAsync(ExternalCookieScheme);
+            await HttpContext.SignOutAsync(ExternalCookieScheme);
+
+            if (!result.Succeeded || result.Principal is null)
+            {
+                return Unauthorized("External authentication failed.");
+            }
+
+            var providerKey = result.Principal.FindFirstValue(ClaimTypes.NameIdentifier);
+            var email = result.Principal.FindFirstValue(ClaimTypes.Email);
+            var name =
+                result.Principal.FindFirstValue(ClaimTypes.Name)
+                ?? result.Principal.FindFirstValue("name");
+
+            if (string.IsNullOrEmpty(providerKey) || string.IsNullOrEmpty(email))
+            {
+                return BadRequest(
+                    "The provider did not return the required profile information (id/email)."
+                );
+            }
+
+            var userId = await service.ExternalLoginAsync(providerEnum, providerKey, email, name);
+            var token = service.GenerateeToken(userId.ToString());
+            Response.Cookies.Append("token", token, new CookieOptions { HttpOnly = true });
+
+            var frontendUrl = configuration["Frontend:RedirectUrl"];
+            return string.IsNullOrWhiteSpace(frontendUrl) ? Ok() : Redirect(frontendUrl);
         }
     }
 }
