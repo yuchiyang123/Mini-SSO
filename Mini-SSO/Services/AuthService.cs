@@ -89,6 +89,25 @@ namespace Mini_SSO.Services
             await context.SaveChangesAsync();
         }
 
+        /// <summary>
+        /// 撤銷一個 JWT（依 jti）。登出時呼叫，讓這個 token 在自然過期前就失效，
+        /// 而不是像原本一樣只清 Cookie、token 本身在到期前仍然有效。
+        /// </summary>
+        public async Task RevokeTokenAsync(string jti, DateTime expiresAtUtc)
+        {
+            var alreadyRevoked = await context.RevokedTokens.AnyAsync(t => t.Jti == jti);
+            if (alreadyRevoked)
+            {
+                return;
+            }
+
+            context.RevokedTokens.Add(new RevokedToken { Jti = jti, ExpiresAt = expiresAtUtc });
+            await context.SaveChangesAsync();
+        }
+
+        public Task<bool> IsTokenRevokedAsync(string jti) =>
+            context.RevokedTokens.AnyAsync(t => t.Jti == jti);
+
         public async Task<Guid> GetIdByUserName(string userName)
         {
             return await context

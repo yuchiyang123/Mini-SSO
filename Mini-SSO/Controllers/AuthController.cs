@@ -59,8 +59,19 @@ namespace Mini_SSO.Controllers
         [HttpPost("logout")]
         [Authorize]
         [ApiAntiforgery]
-        public IActionResult Logout()
+        public async Task<IActionResult> Logout()
         {
+            var jti = User.FindFirstValue(JwtRegisteredClaimNames.Jti);
+            var expClaim = User.FindFirstValue(JwtRegisteredClaimNames.Exp);
+
+            if (!string.IsNullOrEmpty(jti) && long.TryParse(expClaim, out var expUnixSeconds))
+            {
+                await service.RevokeTokenAsync(
+                    jti,
+                    DateTimeOffset.FromUnixTimeSeconds(expUnixSeconds).UtcDateTime
+                );
+            }
+
             Response.Cookies.Delete("token");
             return Ok();
         }

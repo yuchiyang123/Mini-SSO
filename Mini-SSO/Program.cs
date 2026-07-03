@@ -1,12 +1,16 @@
+using System.IdentityModel.Tokens.Jwt;
 using System.Net.Http.Headers;
 using System.Security.Claims;
 using System.Text;
 using System.Text.Json;
+using System.Threading.RateLimiting;
 using AspNet.Security.OAuth.GitHub;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Authentication.Google;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.HttpOverrides;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using Mini_SSO.Middleware;
@@ -14,10 +18,19 @@ using Mini_SSO.Model.Entities;
 using Mini_SSO.Seed;
 using Mini_SSO.Services;
 using Scalar.AspNetCore;
+using Serilog;
 
 const string ExternalCookieScheme = "ExternalCookie";
 
+Log.Logger = new LoggerConfiguration()
+    .MinimumLevel.Information()
+    .MinimumLevel.Override("Microsoft.AspNetCore", Serilog.Events.LogEventLevel.Warning)
+    .Enrich.FromLogContext()
+    .WriteTo.Console()
+    .CreateLogger();
+
 var builder = WebApplication.CreateBuilder(args);
+builder.Host.UseSerilog();
 
 var jwtConfig = builder.Configuration.GetSection("Jwt");
 var key = Encoding.UTF8.GetBytes(jwtConfig["Key"]!);
@@ -65,6 +78,24 @@ var authBuilder = builder
             {
                 context.Token = context.Request.Cookies["token"];
                 return Task.CompletedTask;
+            },
+            // 讓「登出」真的能讓 token 失效，而不是只清 Cookie——舊的 token 若被
+            // 存下來（例如被複製到別的地方），沒有這段的話在自然過期前都還能用。
+            OnTokenValidated = async context =>
+            {
+                var jti = context.Principal?.FindFirstValue(JwtRegisteredClaimNames.Jti);
+                if (string.IsNullOrEmpty(jti))
+                {
+                    context.Fail("Token missing jti claim.");
+                    return;
+                }
+
+                var authService =
+                    context.HttpContext.RequestServices.GetRequiredService<AuthService>();
+                if (await authService.IsTokenRevokedAsync(jti))
+                {
+                    context.Fail("Token has been revoked.");
+                }
             },
         };
     })
@@ -177,6 +208,7 @@ builder.Services.AddAntiforgery(options =>
 });
 
 builder.Services.AddScoped<AuthService>();
+builder.Services.AddHostedService<RevokedTokenCleanupService>();
 
 const string FrontendCorsPolicy = "Frontend";
 var allowedOrigins = (builder.Configuration["Cors:AllowedOrigins"] ?? string.Empty)
@@ -201,14 +233,67 @@ builder.Services.AddCors(options =>
 builder.Services.AddControllers();
 builder.Services.AddAuthorization();
 
+// 全站流量保護（跟登入端點專屬的 IP 鎖定是不同層次）：依來源 IP 分桶，
+// 每 10 秒最多 30 個請求，可以短暫爆發到 50 個。涵蓋所有沒有另外做鎖定
+// 邏輯的端點（例如 /create、/valid/username）。
+builder.Services.AddRateLimiter(options =>
+{
+    options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+    options.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(httpContext =>
+    {
+        var ip = httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+        return RateLimitPartition.GetFixedWindowLimiter(
+            ip,
+            _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = 30,
+                Window = TimeSpan.FromSeconds(10),
+                QueueLimit = 0,
+            }
+        );
+    });
+
+    options.OnRejected = async (context, cancellationToken) =>
+    {
+        context.HttpContext.Response.Headers.RetryAfter = "10";
+        context.HttpContext.Response.ContentType = "application/problem+json";
+        await context.HttpContext.Response.WriteAsJsonAsync(
+            new
+            {
+                title = "Too Many Requests",
+                status = StatusCodes.Status429TooManyRequests,
+                detail = "請求過於頻繁，請稍後再試。",
+            },
+            cancellationToken: cancellationToken
+        );
+    };
+});
+
 builder.Services.AddOpenApi();
 
 var app = builder.Build();
+
+// 必須放在最前面：讓 nginx 轉發過來的 X-Forwarded-For / X-Forwarded-Proto
+// 覆寫 Request.Scheme 與 Connection.RemoteIpAddress，否則登入鎖定會鎖到 nginx
+// 的 IP，Cookie 的 Secure 判斷（Request.IsHttps）也會誤判成一律是 HTTP。
+var forwardedHeadersOptions = new ForwardedHeadersOptions
+{
+    ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto,
+};
+// api 容器不會直接對外開 port（見 docker-compose.yml），只有 nginx 進得來，
+// 所以這裡可以放心信任任何來源的 X-Forwarded-* header，不用另外設定
+// KnownProxies/KnownNetworks 白名單。
+forwardedHeadersOptions.KnownNetworks.Clear();
+forwardedHeadersOptions.KnownProxies.Clear();
+app.UseForwardedHeaders(forwardedHeadersOptions);
+
+app.UseSerilogRequestLogging();
 
 app.MapOpenApi();
 app.MapScalarApiReference();
 app.UseHttpsRedirection();
 app.UseCors(FrontendCorsPolicy);
+app.UseRateLimiter();
 app.UseAuthentication();
 app.UseExceptionHandler();
 app.UseAuthorization();
@@ -258,7 +343,42 @@ app.Use(
         await next();
     }
 );
-app.Run();
+
+try
+{
+    Log.Information("Starting Mini-SSO");
+    await app.RunAsync();
+}
+catch (IOException ex) when (IsAddressInUse(ex))
+{
+    Log.Fatal(
+        "啟動失敗：設定的 Port 已經被其他程式占用，請更換 Port 號後再試一次。"
+            + "可透過環境變數 ASPNETCORE_HTTP_PORTS（或 ASPNETCORE_URLS / --urls）指定其他 Port。"
+            + "原始錯誤：{Message}",
+        ex.Message
+    );
+    Environment.Exit(1);
+}
+catch (Exception ex)
+{
+    Log.Fatal(ex, "Mini-SSO 因未預期的例外而終止");
+    throw;
+}
+finally
+{
+    Log.CloseAndFlush();
+}
+
+static bool IsAddressInUse(Exception? ex)
+{
+    while (ex is not null)
+    {
+        if (ex is Microsoft.AspNetCore.Connections.AddressInUseException)
+            return true;
+        ex = ex.InnerException;
+    }
+    return false;
+}
 
 public record ExternalProviderAvailability(bool Google, bool GitHub)
 {
