@@ -1,5 +1,4 @@
-﻿using Microsoft.AspNetCore.Antiforgery;
-using Microsoft.AspNetCore.Diagnostics;
+﻿using Microsoft.AspNetCore.Diagnostics;
 using Mini_SSO.Common.Exceptions;
 
 namespace Mini_SSO.Middleware
@@ -25,18 +24,13 @@ namespace Mini_SSO.Middleware
                 DomainNotFoundException => (StatusCodes.Status404NotFound, "Not Found"),
                 DomainValidationException => (StatusCodes.Status400BadRequest, "Validation Failed"),
                 TooManyRequestsException => (StatusCodes.Status429TooManyRequests, "Too Many Requests"),
-                AntiforgeryValidationException => (StatusCodes.Status400BadRequest, "Invalid CSRF Token"),
                 _ => (StatusCodes.Status500InternalServerError, "Internal Server Error"),
             };
 
             // Only surface ex.Message for our own well-known exceptions; unexpected
             // exceptions (DB errors, etc.) could leak internal details otherwise.
             var detail =
-                ex
-                    is DomainNotFoundException
-                        or DomainValidationException
-                        or TooManyRequestsException
-                        or AntiforgeryValidationException
+                ex is DomainNotFoundException or DomainValidationException or TooManyRequestsException
                     ? ex.Message
                     : null;
 

@@ -199,13 +199,9 @@ builder.Services.AddHealthChecks().AddDbContextCheck<AuthContext>();
 builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
 builder.Services.AddProblemDetails();
 
-builder.Services.AddAntiforgery(options =>
-{
-    options.HeaderName = "X-CSRF-TOKEN";
-    options.Cookie.Name = "XSRF-TOKEN";
-    options.Cookie.HttpOnly = false;
-    options.Cookie.SecurePolicy = CookieSecurePolicy.SameAsRequest;
-});
+// CSRF: 用 Common/Filters/ApiAntiforgeryAttribute 做簡易雙提交 Cookie 驗證
+// （cookie 值跟 header 值直接比對是否相等），沒有用 ASP.NET Core 內建的
+// IAntiforgery——理由見該檔案的註解。
 
 builder.Services.AddScoped<AuthService>();
 builder.Services.AddHostedService<RevokedTokenCleanupService>();
@@ -307,42 +303,32 @@ using (var scope = app.Services.CreateScope())
     await SeedUser.SeedUserAsync(context, app.Configuration);
 }
 
-app.Use(
-    async (context, next) =>
-    {
-        var headers = context.Response.Headers;
+app.Use(async (context, next) =>
+{
+    var isScalarPath = context.Request.Path.StartsWithSegments("/scalar")
+        || context.Request.Path.StartsWithSegments("/openapi");
 
-        headers.Append("Cross-Origin-Embedder-Policy", "require-corp");
-        headers.Append("Cross-Origin-Opener-Policy", "same-origin");
-        headers.Append("Cross-Origin-Resource-Policy", "same-origin");
+    var headers = context.Response.Headers;
 
-        headers.Append("X-Content-Type-Options", "nosniff");
-        headers.Append("Referrer-Policy", "strict-origin-when-cross-origin");
-        headers.Append(
-            "Permissions-Policy",
-            "camera=(), microphone=(), geolocation=(), payment=()"
-        );
+    headers.Append("Cross-Origin-Embedder-Policy", "require-corp");
+    headers.Append("Cross-Origin-Opener-Policy", "same-origin");
+    headers.Append("Cross-Origin-Resource-Policy", "same-origin");
+    headers.Append("X-Content-Type-Options", "nosniff");
+    headers.Append("Referrer-Policy", "strict-origin-when-cross-origin");
+    headers.Append("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()");
 
-        headers.Append(
-            "Content-Security-Policy",
-            "default-src 'self'; "
-                + "script-src 'self'; "
-                + "style-src 'self'; "
-                + "img-src 'self' data:; "
-                + "font-src 'self'; "
-                + "connect-src 'self'; "
-                + "object-src 'none'; "
-                + "base-uri 'self'; "
-                + "frame-ancestors 'none'"
-        );
+    headers.Append(
+        "Content-Security-Policy",
+        isScalarPath
+            ? "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
+            : "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
+    );
 
-        // ������ݸ�T
-        headers.Remove("Server");
-        headers.Remove("X-Powered-By");
+    headers.Remove("Server");
+    headers.Remove("X-Powered-By");
 
-        await next();
-    }
-);
+    await next();
+});
 
 try
 {

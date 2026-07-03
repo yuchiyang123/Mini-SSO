@@ -1,6 +1,6 @@
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
-using Microsoft.AspNetCore.Antiforgery;
+using System.Security.Cryptography;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -16,8 +16,7 @@ namespace Mini_SSO.Controllers
     public class AuthController(
         AuthService service,
         IConfiguration configuration,
-        ExternalProviderAvailability providerAvailability,
-        IAntiforgery antiforgery
+        ExternalProviderAvailability providerAvailability
     ) : ControllerBase
     {
         private const string ExternalCookieScheme = "ExternalCookie";
@@ -31,14 +30,33 @@ namespace Mini_SSO.Controllers
         };
 
         /// <summary>
-        /// 取得 CSRF token（雙提交 cookie 模式）。前端進站時先呼叫這支，
-        /// 把回傳的 csrfToken 放進後續 POST 請求的 X-CSRF-TOKEN header。
+        /// 取得 CSRF token（雙提交 cookie 模式）。前端進站時先呼叫這支，把回傳的
+        /// csrfToken 放進後續 POST 請求的 X-CSRF-TOKEN header（跟 XSRF-TOKEN cookie
+        /// 的值必須完全相等，驗證邏輯見 ApiAntiforgeryAttribute）。
         /// </summary>
         [HttpGet("csrf")]
         public IActionResult GetCsrfToken()
         {
-            var tokens = antiforgery.GetAndStoreTokens(HttpContext);
-            return Ok(new { csrfToken = tokens.RequestToken });
+            // Hex, not Base64: Base64's `/`/`+`/`=` get percent-encoded by ASP.NET Core
+            // when written into the Set-Cookie header, but the JSON body below returns
+            // the raw (unescaped) value. A frontend that reads document.cookie directly
+            // (browsers never auto-decode it) would then send the percent-encoded form
+            // as the header while the cookie compares against the decoded form — a
+            // guaranteed mismatch. Hex has no characters that ever need encoding.
+            var token = Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(32));
+
+            Response.Cookies.Append(
+                ApiAntiforgeryAttribute.CookieName,
+                token,
+                new CookieOptions
+                {
+                    HttpOnly = false,
+                    Secure = Request.IsHttps,
+                    SameSite = SameSiteMode.Lax,
+                }
+            );
+
+            return Ok(new { csrfToken = token });
         }
 
         [HttpPost()]
