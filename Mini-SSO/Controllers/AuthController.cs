@@ -20,6 +20,8 @@ namespace Mini_SSO.Controllers
     ) : ControllerBase
     {
         private const string ExternalCookieScheme = "ExternalCookie";
+        private const string RefreshCookieName = "refresh_token";
+        private const string RefreshCookiePath = "/api/auth";
 
         private static readonly Dictionary<string, ProviderEnums> ExternalProviders = new(
             StringComparer.OrdinalIgnoreCase
@@ -67,11 +69,39 @@ namespace Mini_SSO.Controllers
             {
                 Guid userId = await service.GetIdByUserName(dto.UserName);
                 string token = service.GenerateeToken(userId.ToString());
+                string refreshToken = await service.GenerateRefreshTokenAsync(userId);
                 AppendAuthCookie(token);
+                AppendRefreshCookie(refreshToken);
 
                 return Ok();
             }
             return BadRequest();
+        }
+
+        /// <summary>
+        /// 用 refresh token（存在 HttpOnly cookie）換一組新的 access token + refresh
+        /// token。access token 過期後前端呼叫這支，不需要使用者重新輸入帳密。
+        /// </summary>
+        [HttpPost("refresh")]
+        [ApiAntiforgery]
+        public async Task<IActionResult> Refresh()
+        {
+            var refreshToken = Request.Cookies[RefreshCookieName];
+            if (string.IsNullOrEmpty(refreshToken))
+            {
+                return Unauthorized();
+            }
+
+            var tokens = await service.RefreshAsync(refreshToken);
+            if (tokens is null)
+            {
+                Response.Cookies.Delete(RefreshCookieName, new CookieOptions { Path = RefreshCookiePath });
+                return Unauthorized();
+            }
+
+            AppendAuthCookie(tokens.AccessToken);
+            AppendRefreshCookie(tokens.RefreshToken);
+            return Ok();
         }
 
         [HttpPost("logout")]
@@ -90,7 +120,14 @@ namespace Mini_SSO.Controllers
                 );
             }
 
+            var refreshToken = Request.Cookies[RefreshCookieName];
+            if (!string.IsNullOrEmpty(refreshToken))
+            {
+                await service.RevokeRefreshTokenAsync(refreshToken);
+            }
+
             Response.Cookies.Delete("token");
+            Response.Cookies.Delete(RefreshCookieName, new CookieOptions { Path = RefreshCookiePath });
             return Ok();
         }
 
@@ -194,7 +231,9 @@ namespace Mini_SSO.Controllers
 
             var userId = await service.ExternalLoginAsync(providerEnum, providerKey, email, name);
             var token = service.GenerateeToken(userId.ToString());
+            var refreshToken = await service.GenerateRefreshTokenAsync(userId);
             AppendAuthCookie(token);
+            AppendRefreshCookie(refreshToken);
 
             var frontendUrl = configuration["Frontend:RedirectUrl"];
             return string.IsNullOrWhiteSpace(frontendUrl) ? Ok() : Redirect(frontendUrl);
@@ -210,6 +249,25 @@ namespace Mini_SSO.Controllers
                     HttpOnly = true,
                     Secure = Request.IsHttps,
                     SameSite = SameSiteMode.Lax,
+                }
+            );
+        }
+
+        private void AppendRefreshCookie(string refreshToken)
+        {
+            var refreshDays = configuration.GetValue("Jwt:RefreshExpireDays", 30);
+
+            Response.Cookies.Append(
+                RefreshCookieName,
+                refreshToken,
+                new CookieOptions
+                {
+                    HttpOnly = true,
+                    Secure = Request.IsHttps,
+                    SameSite = SameSiteMode.Lax,
+                    // 限縮到 /api/auth/* 才會帶上這個 cookie，減少不必要的曝露面。
+                    Path = RefreshCookiePath,
+                    Expires = DateTimeOffset.UtcNow.AddDays(refreshDays),
                 }
             );
         }

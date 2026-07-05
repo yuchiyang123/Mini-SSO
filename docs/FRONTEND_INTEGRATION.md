@@ -105,7 +105,7 @@ GET /api/auth/valid/username?username=someone
 POST /api/auth/logout
 X-CSRF-TOKEN: <從 /api/auth/csrf 拿到的 token>
 ```
-需要已登入（帶有效 `token` Cookie），成功後會撤銷該 JWT 並清掉 Cookie，回 `200 OK`；未登入呼叫會 `401 Unauthorized`。
+需要已登入（帶有效 `token` Cookie），成功後會撤銷該 JWT + refresh token 並清掉兩個 Cookie，回 `200 OK`；未登入呼叫會 `401 Unauthorized`。
 
 ```js
 const csrfToken = await getCsrfToken(); // 跟登入前用的可以是同一個，不用重拿
@@ -114,6 +114,41 @@ await fetch(`${API_BASE}/api/auth/logout`, {
   headers: { 'X-CSRF-TOKEN': csrfToken },
   credentials: 'include',
 });
+```
+
+### 換發新的 access token（refresh）
+
+登入（帳密或 SSO）成功後，後端除了 `token`（access token，短效，預設 60 分鐘過期）Cookie，還會多發一個 `refresh_token` Cookie（`HttpOnly`，只在呼叫 `/api/auth/*` 底下的端點時會被送出）。access token 過期後，不用叫使用者重新輸入帳密，呼叫這支就能換一組新的：
+
+```
+POST /api/auth/refresh
+X-CSRF-TOKEN: <從 /api/auth/csrf 拿到的 token>
+```
+- 成功：`200 OK`，設定新的 `token` + `refresh_token` Cookie（舊的 refresh token 用過即失效，不能再用第二次）。
+- 失敗（沒有 refresh token / 已過期 / 已經被用過）：`401 Unauthorized`，這時候才需要導去登入頁重新登入。
+
+```js
+async function refreshAccessToken() {
+  const csrfToken = await getCsrfToken();
+  const res = await fetch(`${API_BASE}/api/auth/refresh`, {
+    method: 'POST',
+    headers: { 'X-CSRF-TOKEN': csrfToken },
+    credentials: 'include',
+  });
+  return res.ok;
+}
+```
+
+實務上建議的用法：呼叫任何 `[Authorize]` 端點收到 `401` 時，先嘗試呼叫一次 `/api/auth/refresh`，成功的話原本那個請求重打一次；失敗才真的導去登入頁。這樣使用者的 session 可以撐到 refresh token 的有效期（預設 30 天），不會 60 分鐘沒動作就被踢出去。
+
+```js
+async function authorizedFetch(url, options = {}) {
+  let res = await fetch(url, { ...options, credentials: 'include' });
+  if (res.status === 401 && (await refreshAccessToken())) {
+    res = await fetch(url, { ...options, credentials: 'include' }); // 重打一次
+  }
+  return res;
+}
 ```
 
 ### 第三方登入（Google / GitHub）
@@ -180,3 +215,4 @@ if (res.ok) {
 | `POST /api/auth`、`/create`、`/logout` 回 400，訊息是 CSRF 相關 | 沒帶 `X-CSRF-TOKEN` header、沒先呼叫 `GET /api/auth/csrf`，或是 header 的值跟 `XSRF-TOKEN` cookie 的值對不起來（兩者必須完全相等） |
 | 登入回 429 | 同一 IP 連續失敗 5 次，鎖定 10 分鐘，看 `Retry-After` header 決定要等多久 |
 | 短時間內大量請求後開始回 429（跟上面的登入鎖定無關） | 全站流量保護（依 IP，每 10 秒 30 次），等一下就會恢復 |
+| `/api/auth/refresh` 一直回 401 | refresh token 已經被用過一次（rotate 機制，一次性）、已過期，或使用者已登出；這時候應該導去登入頁，不是重試 |

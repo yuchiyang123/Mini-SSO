@@ -194,6 +194,14 @@ builder.Services.AddDbContext<AuthContext>(options =>
     options.UseSqlServer(builder.Configuration.GetConnectionString("DefaultConnection"))
 );
 
+// 撤銷的 access token jti、refresh token 都存 Redis（見 TokenStore），靠 TTL
+// 自動過期，不需要額外的背景清理工作。
+builder.Services.AddStackExchangeRedisCache(options =>
+{
+    options.Configuration = builder.Configuration["Redis:ConnectionString"];
+});
+builder.Services.AddSingleton<TokenStore>();
+
 builder.Services.AddHealthChecks().AddDbContextCheck<AuthContext>();
 
 builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
@@ -204,7 +212,6 @@ builder.Services.AddProblemDetails();
 // IAntiforgery——理由見該檔案的註解。
 
 builder.Services.AddScoped<AuthService>();
-builder.Services.AddHostedService<RevokedTokenCleanupService>();
 
 const string FrontendCorsPolicy = "Frontend";
 var allowedOrigins = (builder.Configuration["Cors:AllowedOrigins"] ?? string.Empty)

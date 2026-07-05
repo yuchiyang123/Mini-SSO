@@ -1,4 +1,16 @@
 services:
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
   db:
     image: mcr.microsoft.com/mssql/server:2022-latest
     environment:
@@ -27,14 +39,18 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      redis:
+        condition: service_healthy
     environment:
       ASPNETCORE_ENVIRONMENT: Production
       ASPNETCORE_HTTP_PORTS: "8080"
       ConnectionStrings__DefaultConnection: "Server=db;Database=Auth;User ID=sa;Password=${SA_PASSWORD};TrustServerCertificate=True"
+      Redis__ConnectionString: "redis:6379"
       Jwt__Key: ${JWT_KEY}
       Jwt__Issuer: ${JWT_ISSUER}
       Jwt__Audience: ${JWT_AUDIENCE}
       Jwt__ExpireMinutes: ${JWT_EXPIRE_MINUTES}
+      Jwt__RefreshExpireDays: ${JWT_REFRESH_EXPIRE_DAYS}
       Authentication__Google__ClientId: ${GOOGLE_CLIENT_ID}
       Authentication__Google__ClientSecret: ${GOOGLE_CLIENT_SECRET}
       Authentication__GitHub__ClientId: ${GITHUB_CLIENT_ID}
@@ -66,3 +82,4 @@ services:
 
 volumes:
   mssql-data:
+  redis-data:

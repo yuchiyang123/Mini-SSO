@@ -1,5 +1,6 @@
 ﻿using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
+using System.Security.Cryptography;
 using System.Text;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.Data.SqlClient;
@@ -12,7 +13,9 @@ using Mini_SSO.Model.Entities;
 
 namespace Mini_SSO.Services
 {
-    public class AuthService(AuthContext context, IConfiguration configuration)
+    public record TokenPair(string AccessToken, string RefreshToken);
+
+    public class AuthService(AuthContext context, IConfiguration configuration, TokenStore tokenStore)
     {
         public readonly IConfiguration _configuration = configuration;
 
@@ -90,23 +93,55 @@ namespace Mini_SSO.Services
         }
 
         /// <summary>
-        /// 撤銷一個 JWT（依 jti）。登出時呼叫，讓這個 token 在自然過期前就失效，
-        /// 而不是像原本一樣只清 Cookie、token 本身在到期前仍然有效。
+        /// 撤銷一個 JWT（依 jti），存進 Redis 並設定 TTL = 這個 token 原本的到期時間，
+        /// 讓它在自然過期前就失效，而不是像單純清 Cookie 那樣、token 本身在到期前
+        /// 仍然有效。TTL 到了 Redis 自己會清掉，不需要額外的清理工作。
         /// </summary>
-        public async Task RevokeTokenAsync(string jti, DateTime expiresAtUtc)
-        {
-            var alreadyRevoked = await context.RevokedTokens.AnyAsync(t => t.Jti == jti);
-            if (alreadyRevoked)
-            {
-                return;
-            }
-
-            context.RevokedTokens.Add(new RevokedToken { Jti = jti, ExpiresAt = expiresAtUtc });
-            await context.SaveChangesAsync();
-        }
+        public Task RevokeTokenAsync(string jti, DateTime expiresAtUtc) =>
+            tokenStore.RevokeAccessTokenAsync(jti, expiresAtUtc);
 
         public Task<bool> IsTokenRevokedAsync(string jti) =>
-            context.RevokedTokens.AnyAsync(t => t.Jti == jti);
+            tokenStore.IsAccessTokenRevokedAsync(jti);
+
+        /// <summary>
+        /// 產生一個新的 refresh token（存在 Redis，值 -> UserId），存活時間由
+        /// Jwt:RefreshExpireDays 決定。
+        /// </summary>
+        public async Task<string> GenerateRefreshTokenAsync(Guid userId)
+        {
+            var refreshToken = Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(32));
+            var refreshDays = _configuration.GetValue("Jwt:RefreshExpireDays", 30);
+            await tokenStore.StoreRefreshTokenAsync(
+                refreshToken,
+                userId,
+                TimeSpan.FromDays(refreshDays)
+            );
+            return refreshToken;
+        }
+
+        /// <summary>
+        /// 用 refresh token 換一組新的 access token + refresh token（rotate：舊的
+        /// refresh token 用完即撤銷，防止同一個 refresh token 被重複使用）。
+        /// 回傳 null 代表 refresh token 不存在/已過期/已用過。
+        /// </summary>
+        public async Task<TokenPair?> RefreshAsync(string refreshToken)
+        {
+            var userId = await tokenStore.GetUserIdForRefreshTokenAsync(refreshToken);
+            if (userId is null)
+            {
+                return null;
+            }
+
+            await tokenStore.RevokeRefreshTokenAsync(refreshToken);
+
+            var newAccessToken = GenerateeToken(userId.Value.ToString());
+            var newRefreshToken = await GenerateRefreshTokenAsync(userId.Value);
+
+            return new TokenPair(newAccessToken, newRefreshToken);
+        }
+
+        public Task RevokeRefreshTokenAsync(string refreshToken) =>
+            tokenStore.RevokeRefreshTokenAsync(refreshToken);
 
         public async Task<Guid> GetIdByUserName(string userName)
         {

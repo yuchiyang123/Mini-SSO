@@ -7,7 +7,6 @@ namespace Mini_SSO.Model.Entities
         public DbSet<Users> Users { get; set; }
         public DbSet<UserLogin> UserLogins { get; set; }
         public DbSet<LoginAttempt> LoginAttempts { get; set; }
-        public DbSet<RevokedToken> RevokedTokens { get; set; }
 
         protected override void OnModelCreating(ModelBuilder builder)
         {
@@ -46,12 +45,6 @@ namespace Mini_SSO.Model.Entities
             {
                 entity.HasKey(e => e.IpAddress);
                 entity.Property(e => e.IpAddress).HasMaxLength(64);
-            });
-
-            builder.Entity<RevokedToken>(entity =>
-            {
-                entity.HasKey(e => e.Jti);
-                entity.Property(e => e.Jti).HasMaxLength(64);
             });
         }
     }

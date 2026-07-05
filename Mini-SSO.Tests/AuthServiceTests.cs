@@ -1,6 +1,9 @@
 using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Caching.Distributed;
+using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Options;
 using Mini_SSO.Common.Enums;
 using Mini_SSO.Common.Exceptions;
 using Mini_SSO.Model.Dtos;
@@ -28,12 +31,17 @@ public class AuthServiceTests
                     ["Jwt:Issuer"] = "test-issuer",
                     ["Jwt:Audience"] = "test-audience",
                     ["Jwt:ExpireMinutes"] = "60",
+                    ["Jwt:RefreshExpireDays"] = "30",
                 }
             )
             .Build();
 
+    // In-memory stand-in for Redis so these stay unit tests (no real Redis needed).
+    private static TokenStore CreateTokenStore() =>
+        new(new MemoryDistributedCache(Options.Create(new MemoryDistributedCacheOptions())));
+
     private static AuthService CreateService(AuthContext context) =>
-        new(context, CreateConfig());
+        new(context, CreateConfig(), CreateTokenStore());
 
     private static async Task<Users> SeedPasswordUserAsync(
         AuthContext context,
@@ -321,6 +329,51 @@ public class AuthServiceTests
         await service.RevokeTokenAsync(jti, DateTime.UtcNow.AddHours(1)); // should not throw / duplicate
 
         Assert.True(await service.IsTokenRevokedAsync(jti));
-        Assert.Equal(1, await context.RevokedTokens.CountAsync(t => t.Jti == jti));
+    }
+
+    [Fact]
+    public async Task RefreshAsync_ValidToken_RotatesAndReturnsNewPair_OldTokenNoLongerWorks()
+    {
+        using var context = CreateContext();
+        var user = await SeedPasswordUserAsync(context);
+        var service = CreateService(context);
+
+        var refreshToken = await service.GenerateRefreshTokenAsync(user.UserId);
+
+        var tokens = await service.RefreshAsync(refreshToken);
+
+        Assert.NotNull(tokens);
+        Assert.NotEmpty(tokens.AccessToken);
+        Assert.NotEqual(refreshToken, tokens.RefreshToken);
+
+        // Old refresh token was rotated away; using it again should fail.
+        var reuseAttempt = await service.RefreshAsync(refreshToken);
+        Assert.Null(reuseAttempt);
+    }
+
+    [Fact]
+    public async Task RefreshAsync_UnknownToken_ReturnsNull()
+    {
+        using var context = CreateContext();
+        var service = CreateService(context);
+
+        var result = await service.RefreshAsync("this-token-was-never-issued");
+
+        Assert.Null(result);
+    }
+
+    [Fact]
+    public async Task RevokeRefreshTokenAsync_PreventsFurtherRefresh()
+    {
+        using var context = CreateContext();
+        var user = await SeedPasswordUserAsync(context);
+        var service = CreateService(context);
+
+        var refreshToken = await service.GenerateRefreshTokenAsync(user.UserId);
+        await service.RevokeRefreshTokenAsync(refreshToken);
+
+        var result = await service.RefreshAsync(refreshToken);
+
+        Assert.Null(result);
     }
 }
